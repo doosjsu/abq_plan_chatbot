@@ -27,6 +27,9 @@ except Exception:  # pragma: no cover
 
 app = Flask(__name__)
 
+# Simple per-instance cache to avoid scraping on every request
+_corpus_cache: str | None = None
+
 
 def get_service_links() -> Dict[str, str]:
     return {
@@ -75,7 +78,7 @@ def scrape_cabq_pages(urls: List[str]) -> str:
     combined_text = ""
     for url in urls:
         try:
-            response = requests.get(url, timeout=20)
+            response = requests.get(url, timeout=5)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
             page_text = soup.get_text(separator=" ")
@@ -86,18 +89,22 @@ def scrape_cabq_pages(urls: List[str]) -> str:
 
 
 def get_corpus_text() -> str:
+    global _corpus_cache
+    if _corpus_cache:
+        return _corpus_cache
+
     planning_url = os.getenv("CABQ_PLANNING_URL")
     if not planning_url:
         raise RuntimeError("CABQ_PLANNING_URL not found in environment variables.")
+
+    # Keep it lightweight to avoid timeouts
     urls_to_scrape = [
         planning_url,
-        "https://www.cabq.gov/planning/department-contact-information",
         "https://www.cabq.gov/planning/contact",
-        "https://www.cabq.gov/planning",
-        "https://www.cabq.gov/planning/about-the-planning-department",
         "https://www.cabq.gov/311/pay-a-bill",
     ]
-    return scrape_cabq_pages(urls_to_scrape)
+    _corpus_cache = scrape_cabq_pages(urls_to_scrape)
+    return _corpus_cache
 
 
 def split_text(text: str, chunk_size: int = 1200, chunk_overlap: int = 150) -> List[str]:
@@ -313,6 +320,17 @@ def chat():
     links = derive_direct_links(question, answer)
 
     return jsonify({"answer": answer, "links": links}), 200
+
+
+# Support /api/* paths when deployed under Vercel's /api routing
+@app.get("/api/health")
+def api_health():
+    return health()
+
+
+@app.post("/api/chat")
+def api_chat():
+    return chat()
 
 
 # Expose app for Vercel Python runtime (WSGI)
