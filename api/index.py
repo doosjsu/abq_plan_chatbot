@@ -240,6 +240,48 @@ def sanitize_answer(answer_text: str) -> str:
     return answer_text
 
 
+def quick_answer_for_keywords(user_message: str) -> Tuple[str, List[Dict[str, str]]] | None:
+    msg = user_message.lower()
+    links = derive_direct_links(user_message, "")
+
+    def with_links(title_filter: str) -> List[Dict[str, str]]:
+        if not links:
+            return []
+        return [l for l in links if title_filter.lower() in l["title"].lower()]
+
+    if any(k in msg for k in ["create account", "new account", "register", "sign up", "signup", "account setup", "make an account"]):
+        answer = (
+            "To create an ABQ-PLAN account: \n"
+            "1) Go to the ABQ-PLAN online portal.\n"
+            "2) Click Register or Create Account.\n"
+            "3) Enter your contact information and verify your email.\n"
+            "4) Sign in and follow prompts to start applications or check status."
+        )
+        acct_links = with_links("Account Services") or links
+        return answer, acct_links
+
+    if any(k in msg for k in ["sign in", "login", "log in"]):
+        answer = (
+            "You can sign in to ABQ-PLAN from the online portal. If you don't have an account yet, choose Register."
+        )
+        acct_links = with_links("Account Services") or links
+        return answer, acct_links
+
+    if any(k in msg for k in ["apply", "permit", "license", "application"]):
+        answer = (
+            "You can apply online through ABQ-PLAN. After signing in, select the appropriate application and follow the steps."
+        )
+        apply_links = with_links("Apply Online") or links
+        return answer, apply_links
+
+    if any(k in msg for k in ["status", "check status"]):
+        answer = "You can check your application or permit status after signing in to ABQ-PLAN."
+        status_links = with_links("Check Status") or links
+        return answer, status_links
+
+    return None
+
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
@@ -254,7 +296,19 @@ def chat():
 
     model_name = os.getenv("OPENAI_MODEL")
     if not model_name:
-        return jsonify({"error": "OPENAI_MODEL not configured"}), 500
+        # Provide a graceful fallback so the UI doesn't just show an error
+        qa = quick_answer_for_keywords(question)
+        if qa is not None:
+            ans, links = qa
+            ans = sanitize_answer(ans)
+            return jsonify({"answer": ans, "links": links}), 200
+        return jsonify({
+            "answer": (
+                "I don't have specific information about that topic in my current knowledge base. "
+                "For this question, I recommend contacting 311 at 505-768-2000 or dialing 311 from any phone. "
+                "They can connect you with the appropriate department or provide the most current information."
+            )
+        }), 200
     if model_name == "gpt-4o-nano":
         model_name = "gpt-3.5-turbo"
 
@@ -262,6 +316,11 @@ def chat():
         corpus = get_corpus_text()
     except Exception as error:
         logging.exception("Corpus initialization failed: %s", str(error))
+        qa = quick_answer_for_keywords(question)
+        if qa is not None:
+            ans, links = qa
+            ans = sanitize_answer(ans)
+            return jsonify({"answer": ans, "links": links}), 200
         return jsonify({
             "answer": (
                 "I ran into an initialization issue. Please contact 311 at 505-768-2000 "
@@ -292,6 +351,11 @@ def chat():
         )
     except Exception as error:
         logging.exception("OpenAI error: %s", str(error))
+        qa = quick_answer_for_keywords(question)
+        if qa is not None:
+            ans, links = qa
+            ans = sanitize_answer(ans)
+            return jsonify({"answer": ans, "links": links}), 200
         return jsonify({
             "answer": (
                 "I ran into an issue processing that question. Please contact 311 at 505-768-2000 "
