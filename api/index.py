@@ -287,6 +287,18 @@ def health():
     return jsonify({"ok": True})
 
 
+@app.get("/test")
+def test():
+    return jsonify({
+        "message": "API is working",
+        "env_vars": {
+            "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),
+            "has_model": bool(os.getenv("OPENAI_MODEL")),
+            "has_planning_url": bool(os.getenv("CABQ_PLANNING_URL")),
+        }
+    })
+
+
 @app.post("/chat")
 def chat():
     payload = request.get_json(silent=True) or {}
@@ -390,6 +402,11 @@ def chat():
 @app.get("/api/health")
 def api_health():
     return health()
+
+
+@app.get("/api/test")
+def api_test():
+    return test()
 
 
 @app.post("/api/chat")
