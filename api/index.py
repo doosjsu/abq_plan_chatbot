@@ -1,25 +1,31 @@
 import os
+import re
 import logging
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from flask import Flask, jsonify, request
 from bs4 import BeautifulSoup
 import requests
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain.text_splitter import CharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
+try:
+    # New OpenAI SDK (>=1.0)
+    from openai import OpenAI
+    _openai_client = OpenAI()
+
+    def generate_completion(model: str, messages: List[Dict[str, str]]) -> str:
+        resp = _openai_client.chat.completions.create(model=model, messages=messages)
+        return (resp.choices[0].message.content or "").strip()
+except Exception:  # pragma: no cover
+    # Legacy SDK fallback
+    import openai as _openai_legacy
+
+    def generate_completion(model: str, messages: List[Dict[str, str]]) -> str:
+        _openai_legacy.api_key = os.getenv("OPENAI_API_KEY")
+        resp = _openai_legacy.ChatCompletion.create(model=model, messages=messages)
+        return (resp["choices"][0]["message"]["content"] or "").strip()
 
 
 app = Flask(__name__)
-
-
-# Globals initialized on cold start. These are safe to cache for the
-# lifetime of the serverless instance, but will not persist across instances.
-global_vectorstore = None
-global_llm = None
 
 
 def get_service_links() -> Dict[str, str]:
@@ -79,16 +85,10 @@ def scrape_cabq_pages(urls: List[str]) -> str:
     return combined_text
 
 
-def build_knowledge_and_models():
-    """Build the vectorstore and LLM once per cold start."""
-    logging.info("Initializing knowledge base and LLM for serverless instance...")
-
+def get_corpus_text() -> str:
     planning_url = os.getenv("CABQ_PLANNING_URL")
     if not planning_url:
-        raise RuntimeError(
-            "CABQ_PLANNING_URL not found in environment variables."
-        )
-
+        raise RuntimeError("CABQ_PLANNING_URL not found in environment variables.")
     urls_to_scrape = [
         planning_url,
         "https://www.cabq.gov/planning/department-contact-information",
@@ -97,36 +97,37 @@ def build_knowledge_and_models():
         "https://www.cabq.gov/planning/about-the-planning-department",
         "https://www.cabq.gov/311/pay-a-bill",
     ]
-    text = scrape_cabq_pages(urls_to_scrape)
-
-    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    docs = splitter.create_documents([text])
-
-    embeddings = OpenAIEmbeddings()
-    # Use /tmp to avoid write restrictions; ephemeral per instance
-    vectorstore = Chroma.from_documents(
-        docs,
-        embeddings,
-        collection_name="cabq_planning",
-        persist_directory="/tmp/chroma",
-    )
-
-    model_name = os.getenv("OPENAI_MODEL")
-    if not model_name:
-        raise RuntimeError(
-            "OPENAI_MODEL not found in environment variables."
-        )
-    if model_name == "gpt-4o-nano":
-        model_name = "gpt-3.5-turbo"
-
-    llm = ChatOpenAI(model=model_name)
-    return vectorstore, llm
+    return scrape_cabq_pages(urls_to_scrape)
 
 
-def ensure_initialized():
-    global global_vectorstore, global_llm
-    if global_vectorstore is None or global_llm is None:
-        global_vectorstore, global_llm = build_knowledge_and_models()
+def split_text(text: str, chunk_size: int = 1200, chunk_overlap: int = 150) -> List[str]:
+    chunks: List[str] = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + chunk_size)
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start = end - chunk_overlap
+        if start < 0:
+            start = 0
+    return chunks
+
+
+_STOPWORDS = set(
+    "the a an and or but if then else for to of in on at by with from is are was were be being been it this that these those as".split()
+)
+
+
+def rank_chunks(question: str, chunks: List[str], top_k: int = 6) -> List[Tuple[int, int]]:
+    q_terms = [t for t in re.findall(r"[a-zA-Z0-9']+", question.lower()) if t not in _STOPWORDS]
+    scored: List[Tuple[int, int]] = []
+    for idx, ch in enumerate(chunks):
+        text_lower = ch.lower()
+        score = sum(text_lower.count(term) for term in q_terms)
+        scored.append((idx, score))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[:top_k]
 
 
 def derive_direct_links(user_message: str, answer_text: str) -> List[Dict[str, str]]:
@@ -239,34 +240,51 @@ def health():
 
 @app.post("/chat")
 def chat():
-    ensure_initialized()
-
     payload = request.get_json(silent=True) or {}
     question = (payload.get("question") or "").strip()
     if not question:
         return jsonify({"error": "Missing 'question'"}), 400
 
-    # Create a per-request memory to avoid cross-user leakage
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        output_key="answer",
+    model_name = os.getenv("OPENAI_MODEL")
+    if not model_name:
+        return jsonify({"error": "OPENAI_MODEL not configured"}), 500
+    if model_name == "gpt-4o-nano":
+        model_name = "gpt-3.5-turbo"
+
+    try:
+        corpus = get_corpus_text()
+    except Exception as error:
+        logging.exception("Corpus initialization failed: %s", str(error))
+        return jsonify({
+            "answer": (
+                "I ran into an initialization issue. Please contact 311 at 505-768-2000 "
+                "if you need immediate assistance."
+            )
+        }), 200
+
+    chunks = split_text(corpus)
+    top_idx_scores = rank_chunks(question, chunks, top_k=6)
+    selected_context = "\n\n".join(chunks[i] for i, _ in top_idx_scores)
+
+    system_prompt = (
+        "You are the ABQ Planning Assistant. Answer using the provided context. "
+        "If the answer is not in the context, say you don't have that information and suggest contacting 311 (505-768-2000)."
     )
-    chain = ConversationalRetrievalChain.from_llm(
-        llm=global_llm,
-        retriever=global_vectorstore.as_retriever(),
-        memory=memory,
-        return_source_documents=False,
-        chain_type="stuff",
-        max_tokens_limit=4000,
-        rephrase_question=True,
+    user_prompt = (
+        f"Question: {question}\n\n" 
+        f"Context:\n{selected_context}\n\nProvide a concise and helpful answer."
     )
 
     try:
-        result = chain({"question": question})
-        answer = str(result.get("answer", "")).strip()
+        answer = generate_completion(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
     except Exception as error:
-        logging.exception("Error generating answer: %s", str(error))
+        logging.exception("OpenAI error: %s", str(error))
         return jsonify({
             "answer": (
                 "I ran into an issue processing that question. Please contact 311 at 505-768-2000 "
