@@ -1,0 +1,39 @@
+CABQ Planning Chatbot - Staff Instructions
+==========================================
+
+📋 HOW TO USE:
+1. Double-click "index.html" to open the chatbot
+2. Type your question in the input field
+3. Press Enter or click submit
+4. Read the answer and click any provided links
+5. Ask follow-up questions as needed
+
+🔗 COMMON QUESTIONS YOU CAN ASK:
+• "How do I apply for a building permit?"
+• "What's the contact information for code enforcement?"
+• "Where is the planning department located?"
+• "How do I file a complaint for a violation?"
+• "What are the business license requirements?"
+• "How do I contact AGIS division?"
+
+✅ FEATURES:
+• Professional interface
+• Direct links to services
+• Mobile responsive
+• Conversation memory
+• No personal information exposed
+
+📞 IF YOU HAVE ISSUES:
+• Check your internet connection
+• Refresh the webpage
+• Contact IT support if chatbot doesn't load
+• Use 311 (505-768-2000) as backup
+
+⚠️ IMPORTANT:
+• Do not modify any files
+• Do not share this folder with unauthorized users
+• Contact IT for any technical issues
+
+---
+Last Updated: January 2025
+Contact: IT Department for support 
